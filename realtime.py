@@ -3,13 +3,56 @@ import numpy as np
 import os
 import pickle
 import datetime
+import base64
+import time
 from keras_facenet import FaceNet
 from sklearn.metrics.pairwise import cosine_similarity
 from mtcnn import MTCNN
 import firebase_admin
 from firebase_admin import credentials, firestore
-import base64
 
+# === THÊM: Màn hình ST7735 ===
+import st7735
+from PIL import Image, ImageDraw, ImageFont
+
+# === THÊM: Loa GPIO ===
+import RPi.GPIO as GPIO
+
+# === THIẾT LẬP THIẾT BỊ NGOẠI VI ===
+# Màn hình ST7735
+disp = st7735.ST7735(
+    port=0,
+    cs=0,
+    dc=24,
+    rst=25,
+    rotation=0,
+    width=128,
+    height=160,
+    invert=False
+)
+disp.begin()
+
+# GPIO Buzzer
+BUZZER_PIN = 18
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(BUZZER_PIN, GPIO.OUT)
+
+def display_name_on_st7735(name: str):
+    WIDTH, HEIGHT = disp.width, disp.height
+    image = Image.new('RGB', (WIDTH, HEIGHT), (0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+    draw.text((10, 70), name, font=font, fill=(0, 255, 0))  # Chữ xanh lá
+    disp.display(image)
+
+def play_beep():
+    for _ in range(2):
+        GPIO.output(BUZZER_PIN, GPIO.HIGH)
+        time.sleep(0.1)
+        GPIO.output(BUZZER_PIN, GPIO.LOW)
+        time.sleep(0.1)
+
+# === THIẾT LẬP NHẬN DIỆN KHUÔN MẶT ===
 embedder = FaceNet()
 detector = MTCNN()
 
@@ -17,17 +60,15 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 with open(os.path.join(BASE_DIR, "Code", "embeddings", "face_cosine_data.pkl"), "rb") as f:
     face_data = pickle.load(f)  
 
-cred = credentials.Certificate(os.path.join(BASE_DIR,"Code", "serviceAccountKey.json"))
+cred = credentials.Certificate(os.path.join(BASE_DIR, "Code", "serviceAccountKey.json"))
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
-# === 1. Chuyển ảnh sang base64 ===
 def image_to_base64(image_path):
     with open(image_path, "rb") as f:
         encoded = base64.b64encode(f.read()).decode("utf-8")
         return f"data:image/jpeg;base64,{encoded}"
 
-# === 2. Hàm so sánh mặt ===
 def match_face(embedding, threshold=0.7):
     best_score = -1
     best_label = "unknown"
@@ -39,28 +80,22 @@ def match_face(embedding, threshold=0.7):
             best_label = label
     return best_label, best_score
 
-# === 3. Hàm upload ảnh lên Firebase ===
 def upload_image_to_firestore(image_path, label="unknown"):
     try:
         base64_img = image_to_base64(image_path)
-
         timestamp = datetime.datetime.utcnow()
-
-        full_name = label  
-
         doc_ref = db.collection("tracking").document()
         doc_ref.set({
             "img": base64_img,
-            "location": "Văn phòng 1",  
+            "location": "Văn phòng 1",
             "timestamp": timestamp,
-            "full_name": full_name  
+            "full_name": label
         })
         print(f"Đã upload: {os.path.basename(image_path)}")
-
     except Exception as e:
         print(f"Lỗi upload ảnh {image_path}:", e)
 
-# === 4. Thiết lập webcam và cửa sổ ===
+# === CHẠY CAMERA ===
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
@@ -70,7 +105,6 @@ cv2.resizeWindow("Face Recognition", 1000, 800)
 
 print("Camera đang chạy... Nhấn 'q' để thoát.")
 
-# === 5. Vòng lặp nhận diện khuôn mặt ===
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -81,10 +115,8 @@ while True:
     for result in results:
         x, y, w, h = result['box']
         try:
-            # Trích xuất khuôn mặt
             face = frame[y:y+h, x:x+w]
             face = cv2.resize(face, (160, 160))
-
             emb = embedder.embeddings([face])[0]
 
             label, score = match_face(emb, threshold=0.7)
@@ -103,6 +135,10 @@ while True:
                     print(f"Đã lưu hình: {filepath}")
                     upload_image_to_firestore(filepath, label)
 
+                    # === GỌI THÊM: hiển thị và phát âm thanh
+                    display_name_on_st7735(label)
+                    play_beep()
+
             cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
             cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
@@ -115,3 +151,4 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
+GPIO.cleanup()
